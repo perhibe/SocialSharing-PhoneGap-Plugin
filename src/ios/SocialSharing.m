@@ -6,12 +6,98 @@
 #import <MessageUI/MFMessageComposeViewController.h>
 #import <MessageUI/MFMailComposeViewController.h>
 #import <MobileCoreServices/MobileCoreServices.h>
+#import <LinkPresentation/LinkPresentation.h>
 
 static NSString *const kShareOptionMessage = @"message";
 static NSString *const kShareOptionSubject = @"subject";
 static NSString *const kShareOptionFiles = @"files";
 static NSString *const kShareOptionUrl = @"url";
 static NSString *const kShareOptionIPadCoordinates = @"iPadCoordinates";
+
+// Класс-источник для кастомного элемента шаринга, объединяющего текст, URL и превью
+@interface TNShareItem : NSObject<UIActivityItemSource>
+
+@property(nonatomic, strong) NSString *text;
+@property(nonatomic, strong) NSURL *url;
+@property(nonatomic, strong) UIImage *previewImage;
+@property(nonatomic, strong) NSString *combinedText;
+
+- (instancetype)initWithText:(NSString *)text urlString:(NSString *)urlString previewImage:(UIImage *)previewImage;
++ (NSURL *)urlFromString:(NSString *)urlString;
+
+@end
+
+@implementation TNShareItem
+
+- (instancetype)initWithText:(NSString *)text urlString:(NSString *)urlString previewImage:(UIImage *)previewImage {
+  self = [super init];
+  if (self) {
+    // Сохраняем данные в «сыром» виде, чтобы избежать двойного кодирования
+    _text = text != (id)[NSNull null] ? text : nil;
+    _url = [TNShareItem urlFromString:urlString];
+    _previewImage = previewImage;
+
+    // Готовим итоговую строку (текст + ссылка) так, чтобы ссылка оставалась парсабельной для Telegram/WhatsApp
+    if (_text != nil && _url != nil) {
+      _combinedText = [NSString stringWithFormat:@"%@\n%@", _text, _url.absoluteString];
+    } else if (_text != nil) {
+      _combinedText = _text;
+    } else if (_url != nil) {
+      _combinedText = _url.absoluteString;
+    } else {
+      _combinedText = @"";
+    }
+  }
+  return self;
+}
+
+- (id)activityViewControllerPlaceholderItem:(UIActivityViewController *)activityViewController {
+  // Плейсхолдер нужен всегда, даже если текст пустой
+  return self.combinedText != nil ? self.combinedText : @"";
+}
+
+- (id)activityViewController:(UIActivityViewController *)activityViewController itemForActivityType:(UIActivityType)activityType {
+  // Возвращаем единственный элемент, содержащий текст и URL одной строкой, чтобы iOS не скрывала превью
+  return self.combinedText != nil ? self.combinedText : @"";
+}
+
+- (NSString *)activityViewController:(UIActivityViewController *)activityViewController subjectForActivityType:(UIActivityType)activityType {
+  // Тема равна тексту, чтобы сохранить заголовок шаринга там, где он поддерживается
+  return self.text;
+}
+
+- (LPLinkMetadata *)activityViewControllerLinkMetadata:(UIActivityViewController *)activityViewController API_AVAILABLE(ios(13.0)) {
+  // Принудительно задаем превью и метаданные для ссылок
+  LPLinkMetadata *metadata = [[LPLinkMetadata alloc] init];
+  metadata.title = self.text != nil && [self.text length] > 0 ? self.text : self.url.absoluteString;
+  if (self.url != nil) {
+    metadata.originalURL = self.url;
+    metadata.URL = self.url;
+  }
+  if (self.previewImage != nil) {
+    metadata.iconProvider = [[NSItemProvider alloc] initWithObject:self.previewImage];
+    metadata.imageProvider = [[NSItemProvider alloc] initWithObject:self.previewImage];
+  }
+  return metadata;
+}
+
++ (NSURL *)urlFromString:(NSString *)urlString {
+  if (urlString == (id)[NSNull null] || urlString == nil || [urlString length] == 0) {
+    return nil;
+  }
+
+  // Не перекодируем URL, чтобы Telegram и другие клиенты могли корректно подтянуть превью
+  NSURL *rawUrl = [NSURL URLWithString:urlString];
+  if (rawUrl != nil) {
+    return rawUrl;
+  }
+
+  // Минимальное экранирование пробелов, если URL был передан без энкодинга
+  NSString *escaped = [urlString stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLFragmentAllowedCharacterSet]];
+  return [NSURL URLWithString:escaped];
+}
+
+@end
 
 @implementation SocialSharing {
   UIPopoverController *_popover;
@@ -91,10 +177,14 @@ static NSString *const kShareOptionIPadCoordinates = @"iPadCoordinates";
 
     NSMutableArray *activityItems = [[NSMutableArray alloc] init];
 
-    if (message != (id)[NSNull null] && message != nil) {
-    [activityItems addObject:message];
+    // Первый элемент – кастомный источник с превью, текстом и URL, чтобы iOS не скрывала карточку
+    UIImage *previewImage = [self getAppIconImage];
+    TNShareItem *shareItem = [[TNShareItem alloc] initWithText:message urlString:urlString previewImage:previewImage];
+    if ((message != (id)[NSNull null] && message != nil) || (urlString != (id)[NSNull null] && urlString != nil)) {
+      [activityItems addObject:shareItem];
     }
 
+    // Локальные файлы добавляются после превью-элемента, чтобы ссылка и текст оставались единым пунктом
     if (filenames != (id)[NSNull null] && filenames != nil && filenames.count > 0) {
       NSMutableArray *files = [[NSMutableArray alloc] init];
       for (NSString* filename in filenames) {
@@ -109,13 +199,7 @@ static NSString *const kShareOptionIPadCoordinates = @"iPadCoordinates";
       [activityItems addObjectsFromArray:files];
     }
 
-    if (urlString != (id)[NSNull null] && urlString != nil) {
-        [activityItems addObject:[NSURL URLWithString:[urlString SSURLEncodedString]]];
-    }
-
-    UIActivity *activity = [[UIActivity alloc] init];
-    NSArray *applicationActivities = [[NSArray alloc] initWithObjects:activity, nil];
-    UIActivityViewController *activityVC = [[UIActivityViewController alloc] initWithActivityItems:activityItems applicationActivities:applicationActivities];
+    UIActivityViewController *activityVC = [[UIActivityViewController alloc] initWithActivityItems:activityItems applicationActivities:nil];
     if (subject != (id)[NSNull null] && subject != nil) {
       [activityVC setValue:subject forKey:@"subject"];
     }
@@ -720,6 +804,25 @@ static NSString *const kShareOptionIPadCoordinates = @"iPadCoordinates";
     CDVPluginResult * pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK];
     [self.commandDelegate sendPluginResult:pluginResult callbackId:self.command.callbackId];
   }
+}
+
+// Извлекаем иконку приложения для использования в качестве превью
+- (UIImage *)getAppIconImage {
+  NSDictionary *infoPlist = [[NSBundle mainBundle] infoDictionary];
+  NSArray *iconFiles = [infoPlist valueForKeyPath:@"CFBundleIcons.CFBundlePrimaryIcon.CFBundleIconFiles"];
+
+  if (iconFiles == nil || [iconFiles count] == 0) {
+    iconFiles = [infoPlist valueForKeyPath:@"CFBundleIcons~ipad.CFBundlePrimaryIcon.CFBundleIconFiles"];
+  }
+
+  for (NSString *iconName in [iconFiles reverseObjectEnumerator]) {
+    UIImage *icon = [UIImage imageNamed:iconName];
+    if (icon != nil) {
+      return icon;
+    }
+  }
+
+  return nil;
 }
 
 -(UIImage*)getImage: (NSString *)imageName {
