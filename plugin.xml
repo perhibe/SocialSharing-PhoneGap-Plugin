@@ -54,6 +54,8 @@
     <header-file src="src/ios/NSString+SSURLEncoding.h"/>
     <source-file src="src/ios/NSString+SSURLEncoding.m"/>
     <header-file src="src/ios/SocialSharing.h"/>
+    <header-file src="src/ios/TNShareItem.h"/>
+    <source-file src="src/ios/TNShareItem.m"/>
     <source-file src="src/ios/SocialSharing.m"/>
 
     <framework src="Social.framework" weak="true" />
